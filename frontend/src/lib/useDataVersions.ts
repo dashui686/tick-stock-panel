@@ -23,7 +23,8 @@ export function useDataVersions() {
     for (const [kind, prefixes] of [['daily', DAILY_DATA_QUERY_PREFIXES], ['minute', MINUTE_DATA_QUERY_PREFIXES]] as const) {
       if (versions[kind] && previous.current?.[kind] !== versions[kind]) {
         void client.invalidateQueries({
-          predicate: q => prefixes.has(String(q.queryKey[0])),
+          predicate: q => prefixes.has(String(q.queryKey[0]))
+            || (kind === 'daily' && q.meta?.usesDailyClose === true),
           refetchType: visible ? 'active' : 'none',
         })
       }

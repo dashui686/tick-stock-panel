@@ -665,6 +665,7 @@ def _latest_live_candle(
         "close": close_price,
         "volume": q.get("volume"),
         "amount": q.get("amount"),
+        "prev_close": q.get("prev_close"),
         "change_pct": q.get("change_pct"),
         "is_live": True,
     }

@@ -67,6 +67,7 @@ def _live_frame() -> pl.DataFrame:
         "close": [10.6],
         "volume": [123_456.0],
         "amount": [1_234_560.0],
+        "prev_close": [10.1],
         "ma5": [10.2],
         "signal_limit_up": [False],
     })
@@ -93,6 +94,7 @@ def test_daily_latest_returns_only_current_memory_row(monkeypatch) -> None:
         "close": 10.6,
         "volume": 123_456.0,
         "amount": 1_234_560.0,
+        "prev_close": 10.1,
         "change_pct": None,
         "ma5": 10.2,
         "is_live": True,

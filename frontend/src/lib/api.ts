@@ -308,6 +308,7 @@ export interface KlineRow {
   low: number
   close: number
   volume?: number
+  prev_close?: number | null
   /** 图表异动判定使用未复权价格与引擎的当日判定价，不与复权 OHLC 混用。 */
   raw_low?: number | null
   raw_close?: number | null

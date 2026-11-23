@@ -225,7 +225,15 @@ def compile_indicator(definition: ChartIndicator):
     return _compile(definition.model_dump_json())
 
 
-def evaluate_frame(definition: ChartIndicator, frame: pl.DataFrame, timeframe: str) -> dict:
+def evaluate_frame(
+    definition: ChartIndicator,
+    frame: pl.DataFrame,
+    timeframe: str,
+    *,
+    visible_start: str | None = None,
+    asset_type: str = "stock",
+    quote_snapshots: dict[str, dict[int, float]] | None = None,
+) -> dict:
     compiled, _, dependencies = compile_indicator(definition)
     missing = [
         name
@@ -234,28 +242,28 @@ def evaluate_frame(definition: ChartIndicator, frame: pl.DataFrame, timeframe: s
     ]
     if missing:
         raise ValueError("当前行情缺少字段：" + "、".join(sorted(missing)))
-    work = frame
-    if definition.reset_daily and timeframe == "minute":
-        work = work.with_columns(
-            pl.concat_str([pl.col("symbol"), pl.lit(":"), pl.col("date")]).alias("symbol")
-        )
-    if timeframe == "minute":
-        # The shared compiler sorts by symbol/date. Preserve each original
-        # minute, before the renderer folds the lunch-break axis position.
-        work = work.with_columns(pl.col("time").alias("date"))
     if definition.syntax == "tdx":
         from app.indicators.tdx import evaluate
+        from app.indicators.tdx_quotes import quote_snapshot
 
-        groups = work.partition_by("symbol", maintain_order=True)
+        program = compiled[0]
+        parameters = [(p.name, p.value) for p in definition.parameters]
+        group_keys = ["symbol"]
+        if definition.reset_daily and timeframe == "minute":
+            group_keys.append("date")
+        snapshots = quote_snapshots or {}
+        if program.dynainfo_numbers and not snapshots:
+            visible = frame.filter(pl.col("time") >= visible_start) if visible_start else frame
+            snapshots = {
+                symbol: quote_snapshot(group, timeframe, asset_type)
+                for (symbol,), group in visible.partition_by("symbol", as_dict=True).items()
+            }
         group_outputs = []
         drawings = []
-        for group in groups:
+        for group in frame.partition_by(group_keys, maintain_order=True):
+            dynainfo = snapshots.get(group["symbol"][0], {}) if snapshots else {}
             result, shapes = evaluate(
-                compiled[0],
-                group,
-                timeframe,
-                [(p.name, p.value) for p in definition.parameters],
-                definition.precision,
+                program, group, timeframe, parameters, definition.precision, dynainfo
             )
             group_outputs.append(result)
             drawings.extend(shapes)
@@ -268,6 +276,14 @@ def evaluate_frame(definition: ChartIndicator, frame: pl.DataFrame, timeframe: s
             "outputs": outputs,
             "drawings": drawings,
         }
+    work = frame
+    if timeframe == "minute":
+        if definition.reset_daily:
+            work = work.with_columns(
+                pl.concat_str([pl.col("symbol"), pl.lit(":"), pl.col("date")]).alias("symbol")
+            )
+        # The shared compiler sorts by symbol/date. Preserve each original minute.
+        work = work.with_columns(pl.col("time").alias("date"))
     outputs = []
     for output, formula in zip(definition.outputs, compiled, strict=True):
         evaluated = formula.frame_transform(work)

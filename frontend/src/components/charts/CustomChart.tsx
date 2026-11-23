@@ -34,10 +34,13 @@ function useIndicators(symbol: string, view: IndicatorView, sourceRows: readonly
     return () => clearTimeout(timer)
   }, [snapshot])
   const sameContext = ready.symbol === symbol && ready.view === view && ready.program === program
+  const usesDailyClose = ready.view === 'minute' && ready.body.rows.at(-1)?.time.slice(11, 16) === '15:00'
+    && ready.body.definitions.some(d => d.syntax === 'tdx' && /\bDYNAINFO\b/i.test(d.source ?? ''))
   const values = useQuery({
     queryKey: QK.chartIndicatorValues(ready.symbol, ready.view, ready.program, ready.source),
     queryFn: ({ signal }) => api.evaluateChartIndicators(ready.body, signal),
     enabled: sameContext && !!symbol && ready.body.rows.length > 0 && ready.body.definitions.length > 0 && visibleIds.size > 0,
+    meta: { usesDailyClose },
     staleTime: Infinity, gcTime: 15_000, retry: false, refetchOnWindowFocus: false,
     placeholderData: (previous, query) => query?.queryKey[1] === symbol && query.queryKey[2] === view && query.queryKey[3] === program
       && previous?.times[0] === ready.body.rows[0]?.time && previous.times.length <= ready.body.rows.length ? previous : undefined,
@@ -126,7 +129,15 @@ export function CustomDaily(props: DailyChartProps) {
 }
 
 export function CustomIntraday(props: LightweightIntradayProps) {
-  const source = useMemo(() => props.sessions?.flatMap(s => s.rows) ?? props.data ?? EMPTY_ROWS, [props.sessions, props.data])
+  const { sessions, data, prevClose } = props
+  const source = useMemo(() => {
+    if (sessions) {
+      return sessions.flatMap(({ rows, prev_close }) =>
+        prev_close == null ? rows : rows.map(row => ({ ...row, prev_close })))
+    }
+    if (!data) return EMPTY_ROWS
+    return prevClose == null ? data : data.map(row => ({ ...row, prev_close: prevClose }))
+  }, [sessions, data, prevClose])
   const state = useIndicators(props.symbol, 'minute', source, props.indicatorRevision)
   const subplots = state.result?.results.filter(r => r.pane === 'sub').length ?? 0
   return <LightweightIntraday {...props} mainTimeAxis showVolume={false}

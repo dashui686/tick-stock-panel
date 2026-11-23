@@ -130,6 +130,23 @@ def test_unsupported_syntax_and_future_functions_fail_with_location(source, mess
         outputs(source)
 
 
+@pytest.mark.parametrize(
+    "argument, message",
+    [("9", r"DYNAINFO\(9\) 尚未接入"), ("7.5", "整数常量"), ("C", "整数常量")],
+)
+def test_dynainfo_rejects_unavailable_and_nonconstant_numbers(argument, message):
+    with pytest.raises(ValueError, match=f"第2行.*{message}"):
+        outputs(f"X:C;\nY:DYNAINFO({argument});")
+
+
+def test_dynainfo_accepts_parameter_and_constant_expression():
+    result = outputs(
+        "N1:=NUM+1; X:DYNAINFO(N1);",
+        parameters=[{"name": "NUM", "value": 6, "min": 3, "max": 8}],
+    )
+    assert result["outputs"][0]["values"] == [bars()["close"][-1]] * 80
+
+
 def naive_window(values, n, fn):
     return [fn(values[max(0, i - n + 1) : i + 1]) for i in range(len(values))]
 

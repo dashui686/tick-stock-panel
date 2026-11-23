@@ -41,7 +41,9 @@ CONSTANTS = {
     "WEEKDAY",
     "PERIOD",
 }
+DYNAINFO_NUMBERS = frozenset({3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14})
 SIGNATURES = {
+    "DYNAINFO": (1, 1),
     "MA": (2, 2),
     "EMA": (2, 2),
     "EXPMA": (2, 2),
@@ -130,7 +132,6 @@ FUTURE = {
 }
 DATA_FUNCTIONS = {
     "FINANCE",
-    "DYNAINFO",
     "CAPITAL",
     "TOTALCAPITAL",
     "WINNER",
@@ -186,6 +187,7 @@ class Program:
     statements: tuple[Statement, ...]
     dependencies: frozenset[str]
     warmup: int
+    dynainfo_numbers: frozenset[int]
 
 
 def statements(source):
@@ -476,6 +478,7 @@ def compile_source(source: str, parameters: tuple[tuple[str, float], ...] = ()) 
     types = {}
     result = []
     dependencies = set()
+    dynainfo_numbers = set()
     output_count = 0
     output_names = set()
     total_nodes = 0
@@ -525,6 +528,15 @@ def compile_source(source: str, parameters: tuple[tuple[str, float], ...] = ()) 
         horizons = {}
         for call in calls:
             function = call.func.id
+            if function == "DYNAINFO":
+                value = constant(call.args[0], constants)
+                if value is None or not math.isfinite(value) or value != int(value):
+                    raise error(line, "DYNAINFO 的编号必须是整数常量")
+                number = int(value)
+                if number not in DYNAINFO_NUMBERS:
+                    raise error(line, f"DYNAINFO({number}) 尚未接入")
+                dynainfo_numbers.add(number)
+                call.args[0] = ast.Constant(value=number)
             period_index = (
                 1
                 if function
@@ -672,4 +684,9 @@ def compile_source(source: str, parameters: tuple[tuple[str, float], ...] = ()) 
         result.append(Statement(name, label, expression, output, style, line, drawing))
     if not result or not any(statement.output for statement in result):
         raise error(1, "至少需要一条输出或绘图语句")
-    return Program(tuple(result), frozenset(dependencies), max(warmups.values(), default=0))
+    return Program(
+        tuple(result),
+        frozenset(dependencies),
+        max(warmups.values(), default=0),
+        frozenset(dynainfo_numbers),
+    )

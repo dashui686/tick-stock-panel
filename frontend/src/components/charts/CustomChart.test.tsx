@@ -78,6 +78,45 @@ it('shares one library query and binds independent daily/minute parameters', asy
   expect(library.definitions[0].parameters[0].value).toBe(20)
 })
 
+it('sends each minute session reference price and refreshes when it is corrected', async () => {
+  const definition = { ...newChartIndicator(), syntax: 'tdx' as const, source: '昨收:DYNAINFO(3);' }
+  library.definitions = [definition]
+  library.views.minute = [{ id: definition.id, parameters: {}, visible: true }]
+  const date = '2026-01-05'
+  const data = [{ datetime: `${date} 09:31:00`, open: 10, high: 11, low: 10, close: 11, volume: 20, amount: 21000 }]
+  const mount = (prior: number, multiDay: boolean) => act(async () => {
+    root.render(<QueryClientProvider client={client}>
+      <CustomIntraday symbol="000001.SZ" data={data} prevClose={prior} sessions={multiDay ? [
+        { date: '2026-01-02', prev_close: 8, rows: [{ ...data[0], datetime: '2026-01-02 09:31:00' }] },
+        { date, prev_close: prior, rows: data },
+      ] : undefined} />
+    </QueryClientProvider>)
+  })
+
+  await mount(9, false)
+  await settle(() => expect(calls.evaluate.mock.lastCall?.[0].rows.map((r: { prev_close: number }) => r.prev_close)).toEqual([9]))
+  await mount(10, false)
+  await settle(() => expect(calls.evaluate.mock.lastCall?.[0].rows.map((r: { prev_close: number }) => r.prev_close)).toEqual([10]))
+  await mount(10, true)
+  await settle(() => expect(calls.evaluate.mock.lastCall?.[0].rows.map((r: { prev_close: number }) => r.prev_close)).toEqual([8, 10]))
+})
+
+it('subscribes completed DYNAINFO charts to daily quote revisions', async () => {
+  const definition = { ...newChartIndicator(), syntax: 'tdx' as const, source: '现价:dynainfo(7);' }
+  library.definitions = [definition]
+  library.views.minute = [{ id: definition.id, parameters: {}, visible: true }]
+  for (const minute of ['14:59', '15:00']) {
+    await act(async () => root.render(<QueryClientProvider client={client}>
+      <CustomIntraday symbol="000001.SZ" data={[
+        { datetime: `2026-01-05 ${minute}:00`, open: 10, high: 11, low: 10, close: 11, volume: 0, amount: 0 },
+      ]} />
+    </QueryClientProvider>))
+    await settle(() => expect(calls.evaluate.mock.lastCall?.[0].rows.at(-1)?.time).toBe(`2026-01-05 ${minute}:00`))
+    const query = client.getQueryCache().findAll({ queryKey: ['chart-indicator-values'], type: 'active' })[0]
+    expect(query.meta?.usesDailyClose).toBe(minute === '15:00')
+  }
+})
+
 it('toggles only chart visibility, retains its toolbar button and independent parameters without opening the editor or recalculating', async () => {
   const d = newChartIndicator()
   library.definitions = [d]

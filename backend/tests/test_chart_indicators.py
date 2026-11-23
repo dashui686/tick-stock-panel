@@ -222,9 +222,9 @@ def test_evaluation_cache_invalidates_for_parameters_and_earlier_bar_correction(
     calls = []
     evaluate = chart_indicators.evaluate_frame
 
-    def spy(*args):
+    def spy(*args, **kwargs):
         calls.append(1)
-        return evaluate(*args)
+        return evaluate(*args, **kwargs)
 
     monkeypatch.setattr(chart_indicators, "evaluate_frame", spy)
     chart_indicators.clear_cache()
@@ -559,3 +559,262 @@ def test_source_compiles_without_quotes_and_rejects_line_errors_before_save(clie
     )
     assert response.status_code == 400
     assert client.get("/api/chart-indicators/library").json() == original
+
+
+@pytest.mark.parametrize("timeframe", ["daily", "minute"])
+def test_dynainfo_uses_latest_chart_snapshot_and_updates_when_quote_changes(client, timeframe):
+    numbers = [3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14]
+    source = {
+        "id": "quote",
+        "name": "行情快照",
+        "syntax": "tdx",
+        "source": "".join(f"Q{number}:DYNAINFO({number});" for number in numbers),
+        "reset_daily": True,
+    }
+    if timeframe == "daily":
+        rows = [
+            {"time": "2026-01-05", "close": 10},
+            {
+                "time": "2026-01-06",
+                "prev_close": 10,
+                "open": 10.2,
+                "high": 11.4,
+                "low": 10.1,
+                "close": 11,
+                "raw_close": 22,
+                "volume": 30,
+                "amount": 63_600,
+            },
+        ]
+        expected_amount = 63_600
+    else:
+        rows = [
+            {"time": "2026-01-05 15:00:00", "prev_close": 8, "close": 10, "volume": 999},
+            {
+                "time": "2026-01-06 09:31:00",
+                "prev_close": 10,
+                "open": 10.2,
+                "high": 10.6,
+                "low": 10.1,
+                "close": 10.5,
+                "volume": 10,
+                "amount": 10_500,
+            },
+            {
+                "time": "2026-01-06 09:32:00",
+                "prev_close": 10,
+                "open": 10.5,
+                "high": 11.4,
+                "low": 10.3,
+                "close": 11,
+                "volume": 20,
+                "amount": 21_300,
+            },
+        ]
+        expected_amount = 31_800
+    assert client.post("/api/chart-indicators/compile", json=source).status_code == 200
+    body = {"symbol": "000001.SZ", "timeframe": timeframe, "rows": rows, "definitions": [source]}
+
+    def evaluate():
+        response = client.post("/api/chart-indicators/evaluate", json=body).json()
+        assert response["errors"] == []
+        values = [output["values"] for output in response["results"][0]["outputs"]]
+        return response["cache_hit"], values
+
+    hit, values = evaluate()
+    assert not hit
+    expected = [10, 10.2, 11.4, 10.1, 11, 30, expected_amount, 10.6, 1, 0.13, 0.1]
+    for actual, value in zip(values, expected, strict=True):
+        assert actual == pytest.approx([value] * len(rows))
+    assert evaluate()[0]
+    rows[-1]["close"] = 11.2
+    if timeframe == "daily":
+        rows[-1]["raw_close"] = 22.4
+    hit, values = evaluate()
+    assert not hit
+    assert values[4] == [11.2] * len(rows)
+    assert values[-1] == pytest.approx([0.12] * len(rows))
+
+
+def test_dynainfo_minute_gaps_and_missing_fields_do_not_produce_partial_totals(client):
+    definition = {
+        "id": "quote",
+        "name": "行情快照",
+        "syntax": "tdx",
+        "source": "O1:DYNAINFO(4); H1:DYNAINFO(5); P:DYNAINFO(7); V1:DYNAINFO(8); A:DYNAINFO(10); R:DYNAINFO(14);",
+    }
+    rows = [
+        {"time": "2026-01-06 09:31:00", "open": 10, "close": 10.5, "volume": 10, "amount": 10_400},
+        {"time": "2026-01-06 09:33:00", "open": 10.5, "close": 11, "volume": 20, "amount": 21_000},
+    ]
+    body = {"symbol": "000001.SZ", "timeframe": "minute", "rows": rows, "definitions": [definition]}
+    response = client.post("/api/chart-indicators/evaluate", json=body).json()
+    assert response["errors"] == []
+    assert [output["values"] for output in response["results"][0]["outputs"]] == [
+        [10.0, 10.0],
+        [None, None],
+        [11.0, 11.0],
+        [None, None],
+        [None, None],
+        [None, None],
+    ]
+
+
+def test_dynainfo_minute_counts_across_lunch_and_keeps_missing_amount_empty(client):
+    start = datetime(2026, 1, 6, 9, 31)
+    morning = [start + timedelta(minutes=i) for i in range(120)]
+    times = [*morning, datetime(2026, 1, 6, 13, 1)]
+    rows = [{"time": time.isoformat(), "close": 10, "volume": 2, "amount": 2000} for time in times]
+    rows[-1]["amount"] = None
+    body = {
+        "symbol": "000001.SZ",
+        "timeframe": "minute",
+        "rows": rows,
+        "definitions": [
+            {
+                "id": "quote",
+                "name": "行情快照",
+                "syntax": "tdx",
+                "source": "总量:DYNAINFO(8); 总额:DYNAINFO(10); 均价:DYNAINFO(11);",
+            }
+        ],
+    }
+    response = client.post("/api/chart-indicators/evaluate", json=body).json()
+    assert response["errors"] == []
+    assert [output["values"][-1] for output in response["results"][0]["outputs"]] == [
+        242.0,
+        None,
+        None,
+    ]
+
+
+def test_dynainfo_average_is_empty_for_an_index(client, monkeypatch):
+    class IndexRepo:
+        def resolve_asset_type(self, symbol):
+            return "index"
+
+    monkeypatch.setattr(client.app.state, "repo", IndexRepo())
+    body = {
+        "symbol": "000001.SH",
+        "timeframe": "daily",
+        "rows": [{"time": "2026-01-06", "close": 3000, "volume": 20, "amount": 25_000}],
+        "definitions": [
+            {
+                "id": "quote",
+                "name": "指数行情",
+                "syntax": "tdx",
+                "source": "现价:DYNAINFO(7); 均价:DYNAINFO(11);",
+            }
+        ],
+    }
+    response = client.post("/api/chart-indicators/evaluate", json=body).json()
+    assert response["errors"] == []
+    assert [output["values"] for output in response["results"][0]["outputs"]] == [[3000.0], [None]]
+
+
+def test_dynainfo_reads_the_final_daily_snapshot_at_the_minute_close(client, monkeypatch):
+    from app.market_time import CN_TZ
+
+    day = date(2026, 1, 6)
+    now = datetime(2026, 1, 6, 15, 30, tzinfo=CN_TZ)
+    monkeypatch.setattr(chart_indicators, "cn_now", lambda: now)
+
+    class CloseRepo:
+        close_stamp = int(datetime(2026, 1, 6, 15, tzinfo=CN_TZ).timestamp() * 1000)
+        amount = 32_400.0
+
+        def resolve_asset_type(self, symbol):
+            return "stock"
+
+        def get_daily_asset(self, asset, symbol, start, end, columns):
+            assert (asset, symbol, start, end) == ("stock", "000001.SZ", day, day)
+            return pl.DataFrame(
+                [
+                    {
+                        "symbol": symbol,
+                        "date": day,
+                        "quote_ts": self.close_stamp,
+                        "close": 11,
+                        "raw_close": 22,
+                        "prev_close": 10,
+                        "volume": 15,
+                        "amount": self.amount,
+                    }
+                ]
+            )
+
+    repo = CloseRepo()
+    client.app.state.repo = repo
+    chart_indicators.clear_cache()
+    body = {
+        "symbol": "000001.SZ",
+        "timeframe": "minute",
+        "rows": [
+            {
+                "time": "2026-01-06 14:59:00",
+                "prev_close": 10,
+                "close": 10.5,
+                "volume": 2,
+                "amount": 2100,
+            },
+            {
+                "time": "2026-01-06 15:00:00",
+                "prev_close": 10,
+                "close": 10.5,
+                "volume": 0,
+                "amount": 0,
+            },
+        ],
+        "definitions": [
+            {
+                "id": "quote",
+                "name": "行情快照",
+                "syntax": "tdx",
+                "source": "P:DYNAINFO(3); Q:DYNAINFO(7); V1:DYNAINFO(8); A:DYNAINFO(10); M:DYNAINFO(11); "
+                "R:DYNAINFO(14); KLINEC:C; KLINEV:V;",
+            }
+        ],
+    }
+
+    def evaluate():
+        result = client.post("/api/chart-indicators/evaluate", json=body).json()
+        assert result["errors"] == []
+        final = [output["values"][-1] for output in result["results"][0]["outputs"]]
+        return result["cache_hit"], final
+
+    assert evaluate()[1] == pytest.approx([10, 11, 15, 32_400, 10.8, 0.1, 10.5, 0])
+    assert evaluate()[0]
+    repo.amount = 33_000
+    hit, values = evaluate()
+    assert not hit
+    assert values[3:5] == pytest.approx([33_000, 11])
+    repo.close_stamp -= 60_000
+    assert evaluate()[1] == [10, 10.5, None, None, None, 0.05, 10.5, 0]
+    repo.close_stamp = None
+    assert evaluate()[1] == [10, 10.5, None, None, None, 0.05, 10.5, 0]
+    now += timedelta(days=1)
+    assert evaluate()[1] == pytest.approx([10, 11, 15, 33_000, 11, 0.1, 10.5, 0])
+
+
+def test_dynainfo_minute_before_close_does_not_read_a_daily_snapshot(client):
+    class MinuteRepo:
+        def get_daily_asset(self, *args, **kwargs):
+            pytest.fail("an intraday cutoff must not read the final daily row")
+
+    client.app.state.repo = MinuteRepo()
+    body = {
+        "symbol": "000001.SZ",
+        "timeframe": "minute",
+        "rows": [{"time": "2026-01-06 14:59:00", "close": 10.5}],
+        "definitions": [
+            {
+                "id": "quote",
+                "name": "盘中现价",
+                "syntax": "tdx",
+                "source": "X:DYNAINFO(7);",
+            }
+        ],
+    }
+    result = client.post("/api/chart-indicators/evaluate", json=body).json()
+    assert result["errors"] == []
+    assert result["results"][0]["outputs"][0]["values"] == [10.5]

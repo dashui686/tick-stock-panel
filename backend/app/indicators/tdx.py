@@ -17,10 +17,11 @@ def truth(value):
 
 
 class Evaluator:
-    def __init__(self, frame, timeframe, parameters, precision):
+    def __init__(self, frame, timeframe, parameters, precision, dynainfo):
         self.size = frame.height
         self.times = frame["time"].to_list()
         self.precision = precision
+        self.dynainfo = dynainfo
         self.indices = np.arange(self.size)
         self.candle_colors = (
             np.where(
@@ -264,6 +265,8 @@ class Evaluator:
         raise ValueError("不支持的表达式")
 
     def call(self, name, args):
+        if name == "DYNAINFO":
+            return self.dynainfo.get(args[0], np.nan)
         if name in {
             "MA",
             "SUM",
@@ -608,8 +611,8 @@ class Evaluator:
         return result
 
 
-def evaluate(program: Program, frame: pl.DataFrame, timeframe, parameters, precision):
-    worker = Evaluator(frame, timeframe, parameters, precision)
+def evaluate(program: Program, frame: pl.DataFrame, timeframe, parameters, precision, dynainfo):
+    worker = Evaluator(frame, timeframe, parameters, precision, dynainfo)
     outputs = []
     drawings = []
     with np.errstate(all="ignore"):

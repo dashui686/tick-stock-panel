@@ -8,7 +8,7 @@ import json
 import math
 import threading
 from collections import OrderedDict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from time import perf_counter
 from typing import Literal
 
@@ -31,7 +31,10 @@ from app.indicators.chart_presets import (
     default_chart_library,
     migrate_library,
 )
+from app.indicators.tdx_quotes import quote_snapshot
+from app.market_time import CN_TZ, cn_now
 from app.services import preferences
+from app.services.daily_health import DailyIntegrityError
 
 _CACHE: OrderedDict[str, tuple[pl.DataFrame, dict, int]] = OrderedDict()
 _CACHE_LOCK = threading.Lock()
@@ -292,6 +295,58 @@ def _warmup(
     return rows
 
 
+def _closing_quote(
+    repo, symbol: str, asset_type: str, final_minute: str
+) -> dict[int, float] | None:
+    day = date.fromisoformat(final_minute[:10])
+    close_at = datetime.combine(day, time(15), tzinfo=CN_TZ)
+    now = cn_now()
+    if now < close_at:
+        return None
+    columns = [
+        "symbol",
+        "date",
+        "quote_ts",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+        "prev_close",
+        "raw_close",
+    ]
+    try:
+        bars = repo.get_daily_asset(asset_type, symbol, day, day, columns=columns)
+    except DailyIntegrityError:
+        return None
+    if bars.is_empty() or not {"symbol", "date", "close"}.issubset(bars.columns):
+        return None
+    bars = bars.filter(
+        pl.col("symbol") == symbol, pl.col("date").cast(pl.String) == day.isoformat()
+    )
+    if bars.height != 1:
+        return None
+    stamp = bars["quote_ts"][0] if "quote_ts" in bars.columns else None
+    if stamp is None:
+        # Historical daily providers may omit quote timestamps. Today's
+        # candle needs evidence that it includes the closing auction.
+        if day == now.date():
+            return None
+    else:
+        cutoff_ms = close_at.timestamp() * 1000
+        end_of_day = datetime.combine(day, time.max, tzinfo=CN_TZ)
+        if (
+            not isinstance(stamp, (int, float))
+            or not cutoff_ms <= stamp <= min(now, end_of_day).timestamp() * 1000
+        ):
+            return None
+    quote = quote_snapshot(
+        bars.with_columns(pl.lit(day.isoformat()).alias("time")), "daily", asset_type
+    )
+    return quote if math.isfinite(quote[7]) else None
+
+
 def evaluate(request: EvaluateRequest, repo=None) -> dict:
     started = perf_counter()
     if not request.rows or not request.definitions:
@@ -310,16 +365,31 @@ def evaluate(request: EvaluateRequest, repo=None) -> dict:
     valid = []
     count = 0
     dependencies: set[str] = set()
+    dynainfo_numbers: set[int] = set()
     for definition in request.definitions:
         try:
-            _, warmup, required = compile_indicator(definition)
+            programs, warmup, required = compile_indicator(definition)
             valid.append(definition)
             dependencies.update(required)
+            if definition.syntax == "tdx":
+                dynainfo_numbers.update(programs[0].dynainfo_numbers)
             if not (definition.reset_daily and request.timeframe == "minute"):
                 count = max(count, warmup)
         except ValueError as exc:
             errors.append({"id": definition.id, "name": definition.name, "message": str(exc)})
-    history = _warmup(repo, request, source[0]["time"], count, dependencies)
+    last_time = source[-1]["time"]
+    use_daily_close = bool(
+        repo and dynainfo_numbers and request.timeframe == "minute" and last_time[11:16] == "15:00"
+    )
+    asset_type = (
+        repo.resolve_asset_type(request.symbol)
+        if repo and (11 in dynainfo_numbers or use_daily_close)
+        else "stock"
+    )
+    quote = _closing_quote(repo, request.symbol, asset_type, last_time) if use_daily_close else None
+    snapshots = {request.symbol: quote} if quote is not None else None
+    visible_start = source[0]["time"]
+    history = _warmup(repo, request, visible_start, count, dependencies)
     history = (
         sorted({r["time"]: r for r in history}.values(), key=lambda r: r["time"])[-count:]
         if count
@@ -348,9 +418,11 @@ def evaluate(request: EvaluateRequest, repo=None) -> dict:
         (
             request.symbol
             + request.timeframe
+            + asset_type
             + str(len(history))
-            + source[0]["time"]
+            + visible_start
             + json.dumps([d.model_dump() for d in valid], sort_keys=True)
+            + json.dumps(quote, sort_keys=True)
         ).encode()
         + frame.hash_rows().to_numpy().tobytes()
     ).hexdigest()
@@ -369,7 +441,14 @@ def evaluate(request: EvaluateRequest, repo=None) -> dict:
     runtime_errors = []
     for definition in valid:
         try:
-            result = evaluate_frame(definition, frame, request.timeframe)
+            result = evaluate_frame(
+                definition,
+                frame,
+                request.timeframe,
+                visible_start=visible_start,
+                asset_type=asset_type,
+                quote_snapshots=snapshots,
+            )
             for output in result["outputs"]:
                 output["values"] = output["values"][len(history) :]
                 if "colors" in output:

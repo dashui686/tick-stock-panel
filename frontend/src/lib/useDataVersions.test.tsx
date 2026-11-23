@@ -33,10 +33,16 @@ it('independent windows refresh only changed datasets, including when quote poll
     await act(async () => root.render(<QueryClientProvider client={client}><Versions /></QueryClientProvider>))
   }
   await tick()
+  const closingIndicator = QK.chartIndicatorValues('000001.SZ', 'minute', 'quote', '15:00')
+  const intradayIndicator = QK.chartIndicatorValues('000001.SZ', 'minute', 'quote', '14:59')
   for (const client of clients) {
     client.setQueryData(['minute-batch'], { data: {} })
     client.setQueryData(['watchlist-enriched', ''], { rows: [] })
     client.setQueryData(['financials'], {})
+    await client.fetchQuery({
+      queryKey: closingIndicator, queryFn: async () => ({}), meta: { usesDailyClose: true },
+    })
+    client.setQueryData(intradayIndicator, {})
   }
   versions = { ...versions, minute: 'server:2' }
   await act(async () => { await Promise.all(clients.map(client => client.invalidateQueries({ queryKey: QK.dataVersions }))) })
@@ -45,9 +51,12 @@ it('independent windows refresh only changed datasets, including when quote poll
     expect(client.getQueryState(['minute-batch'])?.isInvalidated).toBe(true)
     expect(client.getQueryState(['watchlist-enriched', ''])?.isInvalidated).toBe(false)
     expect(client.getQueryState(['financials'])?.isInvalidated).toBe(false)
+    expect(client.getQueryState(closingIndicator)?.isInvalidated).toBe(false)
   }
   versions = { ...versions, daily: 'server:2' }
   await act(async () => { await Promise.all(clients.map(client => client.invalidateQueries({ queryKey: QK.dataVersions }))) })
   await tick()
   expect(clients.every(client => client.getQueryState(['watchlist-enriched', ''])?.isInvalidated)).toBe(true)
+  expect(clients.every(client => client.getQueryState(closingIndicator)?.isInvalidated)).toBe(true)
+  expect(clients.every(client => client.getQueryState(intradayIndicator)?.isInvalidated)).toBe(false)
 })

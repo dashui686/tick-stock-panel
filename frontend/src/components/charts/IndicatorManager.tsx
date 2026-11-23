@@ -552,6 +552,7 @@ export function IndicatorManager({ initial, initialId, symbol, view, sourceRows,
                       <div><h4 className="font-medium text-foreground">双均线与上穿标记</h4><p className="mt-1">在「显示」中选择「主图叠加」，将以下公式画在价格图上。</p><pre className="mt-3 overflow-x-auto rounded-btn border border-border bg-base p-3 font-mono text-[11px] leading-6 text-foreground"><code>{SOURCE_EXAMPLE}</code></pre></div>
                       <p>MA(CLOSE,5) 计算最近 5 根 K 线的收盘均价；CROSS 检测短均线上穿长均线，DRAWICON 在最低价位置绘制向上箭头。</p>
                       <div><h4 className="font-medium text-foreground">变量与输出</h4><p className="mt-1">:= 定义中间变量，: 定义输出，; 结束语句。支持中文名称、花括号注释、AND / OR / NOT 和条件比较。周期变量在「参数」中添加，也可直接在源码中赋值。</p></div>
+                      <div><h4 className="font-medium text-foreground">行情快照</h4><p className="mt-1">DYNAINFO(N) 取图表末端交易日的快照。3 昨收，4 今开，5 最高，6 最低，7 现价，8 总量，10 总额，11 均价，12 日涨跌，13 振幅，14 涨幅。13 和 14 返回小数，乘 100 后可用百分数格式。缺少对应行情时显示空值。</p></div>
                       <div><h4 className="font-medium text-foreground">计算与绘图</h4><p className="mt-1">常用 MA、EMA、SMA、REF、HHV、LLV、STD、COUNT、CROSS、BARSLAST。绘图支持 STICKLINE、DRAWTEXT、DRAWICON（1、2）、DRAWNUMBER、DRAWBAND、DRAWKLINE 和固定位置文字。颜色、线宽及 NODRAW 由源码控制。</p></div>
                       <p className="border-t border-border/60 pt-4">财务、筹码、跨品种、跨周期数据和未来函数尚不支持，解析时会提示行号。</p>
                     </> : <>
